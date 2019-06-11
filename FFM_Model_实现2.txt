@@ -1,0 +1,99 @@
+def gen_data():
+    labels = [-1,1] # 标签，只有点击与未点击
+    y = [np.random.choice(labels,1)[0] for _ in range(all_data_size)]  # [0]脱去括号  从labels中随机挑选，组成y（共有all_data_size个元素）
+    x_field = [i // 10 for i in range(input_x_size)] # field设置 0,1,2,...,8,9,0,1,2,...,8,9,0,1,2,...,8,9  同一个编号的field是一样的（这样对同一个特征数就会有等价类划分mod10同余类）
+    x = np.random.randint(0,2,size=(all_data_size,input_x_size)) #  all_data_size(样本数)*input_x_size(特征数) 
+    return x,y,x_field  # 返回特征，标签和field 
+
+
+def createTwoDimensionWeight(input_x_size,field_size,vector_dimension): #二维权重
+    weights = tf.truncated_normal([input_x_size,field_size,vector_dimension]) # input_x_size(特征数)*field_size(field数)*vector_dimension(向量维数？潜变量维数)  截断正态分布
+    tf_weights = tf.Variable(weights) # 转换成变量
+    return tf_weights
+
+def createOneDimensionWeight(input_x_size): #一维权重
+    weights = tf.truncated_normal([input_x_size])  #  input_x_size(特征数)  截断正态分布
+    tf_weights = tf.Variable(weights) # 转换成变量
+    return tf_weights
+
+def createZeroDimensionWeight():  #0维权重
+    weights = tf.truncated_normal([1]) # 一个数 从截断正态分布中抽取
+    tf_weights = tf.Variable(weights) # 
+    return tf_weights
+
+
+def inference(input_x,input_x_field,zeroWeights,oneDimWeights,thirdWeight):
+    """计算回归模型输出的值"""
+
+    secondValue = tf.reduce_sum(tf.multiply(oneDimWeights,input_x,name='secondValue'))  #  secondValue = oneDimWeights和input_x作内积
+
+    firstTwoValue = tf.add(zeroWeights, secondValue, name="firstTwoValue")  #  firstTwoValue = zeroWeights * secondValue
+
+    thirdValue = tf.Variable(0.0,dtype=tf.float32)  #  thirdValue初始化为0
+    input_shape = input_x_size  #  input_shape = input_x_size(特征数)
+
+    for i in range(input_shape): # 遍历特征索引
+        featureIndex1 = i  # 特征索引
+        fieldIndex1 = int(input_x_field[i])  # field索引
+        for j in range(i+1,input_shape): # 遍历余下特征索引(i+1开始，不允许重复)
+            featureIndex2 = j  # 第二个特征索引
+            fieldIndex2 = int(input_x_field[j])  # 拿到第二个特征索引对应的field索引
+			
+			#vi_fj
+            vectorLeft = tf.convert_to_tensor([[featureIndex1,fieldIndex2,i] for i in range(vector_dimension)]) # 遍历潜变量个数，拿到list的list。[[featureIndex1,fieldIndex2,0],[featureIndex1,fieldIndex2,1]...]
+            weightLeft = tf.gather_nd(thirdWeight,vectorLeft)  # 从thirdWeight(input_x_size(特征数)*field_size(field数)*vector_dimension(潜变量维数))  拿到对应的权重    vectorRight:特征索引,field索引,潜变量索引
+            weightLeftAfterCut = tf.squeeze(weightLeft)  # 删去1维成分比如 1*6 -> 6
+
+			#vj_fi 计算过程同vi_fj
+            vectorRight = tf.convert_to_tensor([[featureIndex2,fieldIndex1,i] for i in range(vector_dimension)])
+            weightRight = tf.gather_nd(thirdWeight,vectorRight)
+            weightRightAfterCut = tf.squeeze(weightRight)
+
+            tempValue = tf.reduce_sum(tf.multiply(weightLeftAfterCut,weightRightAfterCut))  # tempValue = vi_fj和vj_fi作内积 
+
+            indices2 = [i]
+            indices3 = [j]
+
+            xi = tf.squeeze(tf.gather_nd(input_x, indices2)) # 抽出xi
+            xj = tf.squeeze(tf.gather_nd(input_x, indices3)) # 抽取xj
+
+            product = tf.reduce_sum(tf.multiply(xi, xj)) # product = xi和xj作内积
+
+            secondItemVal = tf.multiply(tempValue, product)  # secondItemVal(二阶项估计值) = tempValue * product
+
+            tf.assign(thirdValue, tf.add(thirdValue, secondItemVal))  # thirdValue = thirdValue + secondItemVal
+
+    return tf.add(firstTwoValue,thirdValue)  #  一阶项 + 二阶项 + 偏置
+
+
+lambda_w = tf.constant(0.001, name='lambda_w')  # 常数lambda_w
+lambda_v = tf.constant(0.001, name='lambda_v')  # 常数lambda_v
+
+zeroWeights = createZeroDimensionWeight()  # 偏置
+
+oneDimWeights = createOneDimensionWeight(input_x_size)  # 一阶项系数
+
+thirdWeight = createTwoDimensionWeight(input_x_size,  # 创建二阶项的权重变量
+                                       field_size,
+                                       vector_dimension)  # n * f * k
+
+y_ = inference(input_x, trainx_field,zeroWeights,oneDimWeights,thirdWeight) # 拿到预测值(估计值)y_
+
+l2_norm = tf.reduce_sum(
+    tf.add(
+        tf.multiply(lambda_w, tf.pow(oneDimWeights, 2)),
+        tf.reduce_sum(tf.multiply(lambda_v, tf.pow(thirdWeight, 2)),axis=[1,2])
+    )   # 正则化项 
+)
+
+loss = tf.log(1 + tf.exp(input_y * y_)) + l2_norm  # 损失函数  -tf.log(1/(1 + tf.exp(input_y * y_))) + l2_norm  (-1)*一个sigmoid包裹一个极大似然估计   就变成了 mini(loss)
+
+train_step = tf.train.GradientDescentOptimizer(learning_rate=lr).minimize(loss)  # 梯度下降
+
+input_x_batch = trainx[t]
+
+input_y_batch = trainy[t]
+
+predict_loss,_, steps = sess.run([loss,train_step, global_step],
+                         
+			feed_dict={input_x: input_x_batch, input_y: input_y_batch}) # 求解
