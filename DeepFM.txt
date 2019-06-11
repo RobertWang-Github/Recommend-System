@@ -1,0 +1,112 @@
+
+deep_layers=[32, 32]  # 测试用 表示每层神经元数目
+
+weights['feature_embeddings']   特征数 * 嵌入维度
+weights['feature_bias']         特征数 * 1
+
+
+weights['layer_0']              field大小 * 嵌入维度 * deep_layers[0](即32)
+weights['bias_0']               1 * self.deep_layers[0]
+
+
+weights["layer_%d" % i]         self.deep_layers[i - 1] * self.deep_layers[i]
+weights["bias_%d" % i]          1 * self.deep_layers[i]
+
+
+if self.use_fm and self.use_deep:   input_size = self.field_size + self.embedding_size + self.deep_layers[-1]
+elif self.use_fm:   input_size = self.field_size + self.embedding_size
+elif self.use_deep:   input_size = self.deep_layers[-1]
+weights['concat_projection']    拼接权重 input_size * 1
+weights['concat_bias']          tf.constant(0.01)
+
+
+input_size = self.field_size * self.embedding_size   # 输入大小：field数目 * 嵌入维度 
+
+
+
+网络结构：
+
+tips:注意embedding_lookup(embeddings,encoder) 按行取，encoder为index的list
+feat_index？？ 
+
+
+self.feat_index           shape=[None,None]  
+self.feat_value           shape=[None,None]
+self.label                shape=[None,1]
+self.dropout_keep_fm      shape=[None]
+self.dropout_keep_deep    shape=[None]
+
+
+
+embedding部分：
+1、每个样本 有F个特征，从weights['feature_embeddings']拿到每个特征的嵌入向量，返回self.embeddings N(样本数) * F(field_size即field数) * K(嵌入维数)
+2、将feat_value按照self.field_size进行分份，shape修改为 (feat_value_size/field_size) * field_size * 1 
+3、self.embeddings = tf.multiply(self.embeddings,feat_value) embeddings中每个向量乘以同一个数(from feat_value)
+field_size指的是有几个field
+
+
+
+一阶项：
+1、A = 根据feat_index从self.weights['feature_bias']拿到对应的feature_bias(embedding_lookup) 返回 样本数*field_size*embedding维数 
+2、A 和 feat_value作hadamard乘积(对于每个样本和feat，都有一个feat_value值，这个值无差别乘入embedding)，再按照第3维(即embedding维数)求平方和(模)
+3、加入一个dropout
+返回 样本数*field_size
+
+
+
+二阶项：
+self.embeddings：N(样本数) * F(field_size) * K(嵌入维数)
+1、先求和再取平方
+   1.1、A = 对self.embeddings 所有行向量(每个样本都有一组行向量(第二维))求和
+   1.2、对A的每个元素(求和后每个样本得到一个行向量)取平方
+   返回 sum-square-part N * K
+
+2、先取平方再求和
+   2.1、B = 对self.embedding所有值取平方
+   2.2、对B的 所有行向量(每个样本都有一组行向量，分量取过平方)求和
+   返回 square-sum-part N * K
+
+3、self.y_second_order = 0.5 * (sum-square-part - square-sum-part) 加一个dropout  为N * 1 * K    注：每个EmbeddingVector的每个分量都考虑特征间相互作用(二阶)
+样本数*[,,]
+
+
+
+deep项：
+1、self.y_deep = 将self.embeddings reshape为 -1(样本数) * [(field大小 * 嵌入维度embedding_size)]
+2、self.y_deep = 添加dropout
+3、遍历所有的deep_layers：
+	3.0、self.y_deep *(矩阵乘法)   self.weights["layer_%d"%0]((field大小 * 嵌入维度) * deep_layers[0]) + self.weights["bias_%d"%0](求和后输入到激活函数，再添加dropout)   返回的shape为 -1(样本数*特征数/field大小) * deep_layers[0]
+	3.1、self.y_deep *(矩阵乘法)   self.weights["layer_%d"%1]+ self.weights["bias_%d"%1](求和后输入到激活函数，再添加dropout)   返回的shape为-1(样本数*特征数/field大小) * deep_layers[1]
+	3.2、以此类推 最后一层返回的shape为(样本数*特征数/field大小) * deep_layers[-1]
+
+
+拼接：
+将
+1、self.y_first_order   shape为 样本数*feat数
+2、self.y_second_order  shape为 N * K
+3、self.y_deep          shape为 样本数 * deep_layers[-1]
+按照第二维axis=1进行拼接
+
+
+
+
+
+
+deep部分：
+features（分成若干fields，每一个fields和embedding层部分全连接） 
+   ↓(部分全连接)
+embedding_size(共有fields * embedding_size 个节点数(维数))
+   ↓(全连接)
+deep_layers[0]
+   ↓
+deep_layers[1]
+   ↓
+   ...
+   ↓
+deep_layers[-1]
+
+拼接部分
+field_size,embedding_size,deep_layers[-1]
+         ↘        ↓        ↙
+                 output
+
