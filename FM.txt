@@ -1,0 +1,185 @@
+from itertools import count 
+from collections import defaultdict
+from scipy.sparse import csr    
+from __future__ import print_function 
+
+def vectorize_dic(dic, ix=None, p=None):
+    """ 
+    Creates a scipy csr matrix from a list of lists (each inner list is a set of values corresponding to a feature) 
+    
+    parameters:
+    -----------
+    dic -- dictionary of feature lists. Keys are the name of features    eg:{"users":train.user.values,"items":train.item.values}
+    ix -- index generator (default None)
+    p -- dimension of featrure space (number of columns in the sparse matrix) (default None)
+    """
+    if (ix == None):
+        d = count(0)
+        ix = defaultdict(lambda: next(d)) # 利用迭代器设置defaultdict的默认值，不同的key会相继增加默认值，而已经有的key则不会
+        
+	#dic 的keys为 user_id、movie_id、score、time	
+    n = len(list(dic.values())[0]) # num samples    list(dict.values())[0]  返回user_id的list，因为是包含所有样本，所以user_id有重复  movie_id和score也是同样情况
+    g = len(list(dic.keys())) # num groups   拿到keys数 此处应该是2,3或者4(如果包含score和time)  不妨假设为2  user_id and movie_id
+    nz = n * g # number of non-zeros   非0元数
+
+    col_ix = np.empty(nz, dtype=int)   # 一个nz长的空向量
+    
+    i = 0 
+    for k, lis in dic.items(): # user_id:[...]  movie_id:[...]
+        # append index el with k in order to prevet mapping different columns with same id to same index
+        col_ix[i::g] = [ix[str(el) + str(k)] for el in lis]  
+		# [ix[str(el) + str(k)] for el in lis]    给user_id打上标号从0开始    其中：str(el) + str(k)为 user_id具体取值加“user_id”  
+		# 结果存入col_ix  步长为g 是因为最后col_ix的格式为 [user_id1对应的ix值,movie_id1对应的ix值,...,user_id2同前,movie_id2同前,...]    eg: [0,13,0,14,1,14...]
+        i += 1 #索引+1 进入movie_id 或者其他
+        
+    row_ix = np.repeat(np.arange(0, n), g)  # 样本数重复g次  [user_ids,movie_ids,...]
+    data = np.ones(nz) # data值都为1？
+    
+    if (p == None):
+        p = len(ix) # 不重复的user_id、movie_id总数
+        
+    ixx = np.where(col_ix < p) # col_ix<p 的所有位置  假如用户、电影编号结束后，电影最多为1...p个   <p说不通啊  最大值应该是用户数+电影数啊？   p就是不重复的user_id、movie_id总数 
+	# 其实<p的这个约束基本没用
+    return csr.csr_matrix((data[ixx],(row_ix[ixx], col_ix[ixx])), shape=(n, p)), ix    # n行p列    
+	#csr_matrix(data,(row_ind,col_ind),shape=(M,N))  a[row_ind[k],col_ind[k]] = data[k]
+	#row_ix [0,0,1,1,2,2,3,3,...]   i对应第i个样本   0(row_ix[0]),0(row_ix[1]) 表示第0个样本的第一个特征(user_id)和第二个特征(movie_id)，即矩阵的第0行有两个位置为1(列为col_ix[0],col_ix[1])
+	#col_ix根据ix[key]可以拿到不同的标号，分别对应不重复的user_id和movie_id 所以列数为p
+	#如此一来，每行都对应一个user_id和movie_id对
+	#返回ix可以根据标号拿到原始值和特征
+	#返回的csr_matrix支持索引取值csr_matrix[row_ind,col_ind]
+
+
+import pandas as pd
+import numpy as np
+from sklearn.feature_extraction import DictVectorizer
+
+# laod data with pandas
+cols = ['user', 'item', 'rating', 'timestamp']
+train = pd.read_csv('data/ua.base', delimiter='\t', names=cols)
+test = pd.read_csv('data/ua.test', delimiter='\t', names=cols)
+
+# vectorize data and convert them to csr matrix
+X_train, ix = vectorize_dic({'users': train.user.values, 'items': train.item.values}) # 传入dict
+X_test, ix = vectorize_dic({'users': test.user.values, 'items': test.item.values}, ix, X_train.shape[1])  # 传入dict(数据源),ix(已经拿到的标号和数据对应关系),特征数
+y_train = train.rating.values #拿到user_id对movie_id的打分
+y_test= test.rating.values
+
+
+X_train = X_train.todense() #转化成Dense_Matrix，这样做不会失去csr_matrix的优势吗，那之前的csr_matrix转换意义何在
+X_test = X_test.todense()
+
+# print shape of data
+print(X_train.shape)
+print(X_test.shape)
+
+
+
+import tensorflow as tf
+
+n, p = X_train.shape #样本数，特征数(不重复的user_id和moive_id)(可见是一个纯one-hot特征)
+
+# number of latent factors
+k = 10 #潜变量数(为了表达one-hot特征下的潜在信息)
+
+# design matrix
+X = tf.placeholder('float', shape=[None, p])  #传入特征
+# target vector
+y = tf.placeholder('float', shape=[None, 1])  #传入标签
+
+# bias and weights
+w0 = tf.Variable(tf.zeros([1])) # 
+W = tf.Variable(tf.zeros([p])) # 特征向量和W作内积
+
+# interaction factors, randomly initialized 
+V = tf.Variable(tf.random_normal([k, p], stddev=0.01))    # 正态初始化   k*p的矩阵
+
+# estimate of y, initialized to 0.
+y_hat = tf.Variable(tf.zeros([n, 1]))   # 样本数*1 y的预测值(估计值)
+
+
+
+from IPython.display import display, Math, Latex
+display(Math(r'\hat{y}(\mathbf{x}) = w_0 + \sum_{j=1}^{p}w_jx_j + \frac{1}{2} \sum_{f=1}^{k} ((\sum_{j=1}^{p}v_{j,f}x_j)^2-\sum_{j=1}^{p}v_{j,f}^2 x_j^2)'))
+
+
+# Calculate output with FM equation
+linear_terms = tf.add(w0, tf.reduce_sum(tf.multiply(W, X), 1, keep_dims=True))  # 1为向量内部求和  0为向量之间求和 keep_dims保留框 [[1,1,1],[1,1,1]] -> [[3],[3]] 结果再加上w0的偏置，最终得到线性部分
+pair_interactions = (tf.multiply(0.5,
+                    tf.reduce_sum( #求和，对k个潜变量
+                        tf.subtract(
+                            tf.pow( tf.matmul(X, tf.transpose(V)), 2), #作内积(每个样本有p个特征，每个潜变量有p个分量)之后取平方
+                            tf.matmul(tf.pow(X, 2), tf.transpose(tf.pow(V, 2)))), #取平方之后作内积
+                        1, keep_dims=True))) #二阶项
+y_hat = tf.add(linear_terms, pair_interactions) #将一阶项和二阶项相加
+
+
+
+display(Math(r'L = \sum_{i=1}^{n} (y_i - \hat{y}_i)^2 + \lambda_w ||W||^2 + \lambda_v ||V||^2'))
+
+
+
+# L2 regularized sum of squares loss function over W and V
+lambda_w = tf.constant(0.001, name='lambda_w')   #w正则化项的系数
+lambda_v = tf.constant(0.001, name='lambda_v')   #v正则化项的系数
+
+l2_norm = (tf.reduce_sum( #将所有项求和
+            tf.add( #这样sum会放大W，因为W会加到每一个V之上
+                tf.multiply(lambda_w, tf.pow(W, 2)),
+                tf.multiply(lambda_v, tf.pow(V, 2)))))
+
+error = tf.reduce_mean(tf.square(tf.subtract(y, y_hat))) #mse
+loss = tf.add(error, l2_norm) #将mse和正则化项相加
+
+
+
+display(Math(r'\Theta_{i+1} = \Theta_{i} - \eta \frac{\delta L}{\delta \Theta}'))
+
+optimizer = tf.train.GradientDescentOptimizer(learning_rate=0.01).minimize(loss)
+
+
+def batcher(X_, y_=None, batch_size=-1):
+    n_samples = X_.shape[0] #样本数
+
+    if batch_size == -1:
+        batch_size = n_samples #batch大小修改为n_samples
+    if batch_size < 1:
+       raise ValueError('Parameter batch_size={} is unsupported'.format(batch_size)) # 不允许<1的batch_size
+
+    for i in range(0, n_samples, batch_size):#gap为batch_size进行遍历
+        upper_bound = min(i + batch_size, n_samples) #i再跳过batch_size也不能穿过n_samples
+        ret_x = X_[i:upper_bound] #取出i到upper_bound的元素
+        ret_y = None
+        if y_ is not None:
+            ret_y = y_[i:i + batch_size] #y_如果不为空就取出[i:i+batch_size]
+            yield (ret_x, ret_y)
+
+
+from tqdm import tqdm_notebook as tqdm
+
+epochs = 10
+batch_size = 1000
+
+# Launch the graph
+init = tf.global_variables_initializer()
+sess = tf.Session()
+
+sess.run(init)
+
+for epoch in tqdm(range(epochs), unit='epoch'): # epochs=10,迭代10轮
+    perm = np.random.permutation(X_train.shape[0]) # 打乱样本导入顺序，每个epoch都重新执行
+    # iterate over batches
+    for bX, bY in batcher(X_train[perm], y_train[perm], batch_size): # 获取batch
+        sess.run(optimizer, feed_dict={X: bX.reshape(-1, p), y: bY.reshape(-1, 1)})  # 调整数据导入格式，执行sess 
+
+
+
+errors = []
+for bX, bY in batcher(X_test, y_test):
+    errors.append(sess.run(error, feed_dict={X: bX.reshape(-1, p), y: bY.reshape(-1, 1)})) # 运行测试集
+
+RMSE = np.sqrt(np.array(errors).mean())
+print(RMSE)
+
+
+
+sess.close()
